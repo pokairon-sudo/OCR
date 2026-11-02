@@ -1,43 +1,64 @@
-import cv2
-import easyocr
+#!/usr/bin/env python3
+"""CLI entry point. All logic lives in the `invoice` package."""
 
-# Load the image
-image_path = './Captcha.jpg'  # Update this to your actual image path
-image = cv2.imread(image_path)
+from __future__ import annotations
 
-# Check if the image was loaded successfully
-if image is None:
-    print("Error: Could not load image.")
-    exit()
+import argparse
+import json
+import os
+import sys
 
-# Convert the image to grayscale
-gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+from dotenv import load_dotenv
 
-# Apply thresholding (optional)
-_, thresh_image = cv2.threshold(gray_image, 149, 255, cv2.THRESH_BINARY_INV)
+from invoice.extract import extract
+from invoice.preprocess import preprocess
+from invoice.utils import clean_int
 
-# Initialize EasyOCR Reader
-reader = easyocr.Reader(['en'])
 
-# Perform OCR on the image
-results = reader.readtext(thresh_image)
+def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
 
-# Set confidence threshold
-confidence_threshold = 0.5  # Adjust this value as needed
+    ap = argparse.ArgumentParser(
+        description="Extract line items from a Persian grocery receipt photo."
+    )
+    ap.add_argument("image", help="Path to the receipt image")
+    ap.add_argument(
+        "--model",
+        default=os.getenv("OLLAMA_MODEL", "qwen2.5vl:3b-8k"),
+        help="Ollama model name (default from .env)",
+    )
+    ap.add_argument("--debug", action="store_true")
+    ap.add_argument("--json", action="store_true", help="Emit JSON only")
+    args = ap.parse_args(argv)
 
-# Print results based on confidence threshold
-for (bbox, text, prob) in results:
-    if prob >= confidence_threshold:  # Check if confidence meets the threshold
-        (top_left, top_right, bottom_right, bottom_left) = bbox
-        top_left = tuple(map(int, top_left))
-        bottom_right = tuple(map(int, bottom_right))
-        
-        # Draw rectangle around detected text
-        cv2.rectangle(image, top_left, bottom_right, (0, 255, 0), 2)
-        # Print detected number with probability
-        print(f'Detected Number: {text} (Confidence: {prob:.2f})')
+    prepped = preprocess(
+        args.image,
+        target_width=int(os.getenv("INVOICE_TARGET_WIDTH", "1400")),
+    )
+    inv = extract(prepped, args.model, debug=args.debug)
 
-# Show the image with detected text
-cv2.imshow('Detected Text', image)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    if args.json:
+        print(json.dumps(inv.model_dump(), ensure_ascii=False, indent=2))
+        return 0
+
+    print("\n" + "=" * 70)
+    for it in inv.items:
+        wt = f"وزن:{it.weight}" if it.weight else ""
+        qt = f"تعداد:{it.quantity}" if it.quantity else ""
+        extra = " ".join(x for x in (wt, qt) if x) or "-"
+        print(
+            f"{it.name:<25} | {extra:<15} | "
+            f"واحد: {clean_int(it.unit_price):>10,} | "
+            f"جمع: {clean_int(it.total_price):>10,}"
+        )
+    print("=" * 70)
+    grand = clean_int(inv.grand_total)
+    line_sum = sum(clean_int(i.total_price) for i in inv.items)
+    print(f"جمع کل: {grand:,}")
+    if grand != line_sum:
+        print(f"⚠  line sum={line_sum:,}  diff={line_sum - grand:+,}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
