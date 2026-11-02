@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "name": "لیمو شیرین",
+      "weight": "0/590",
+      "quantity": "1",
+      "unit_price": "23000",
+      "total_price": "13570"
+    },
+    {
+      "name": "خیار شمال",
+      "weight": "0/760",
+      "quantity": "-",
+      "unit_price": "12600",
+      "total_price": "9576"
+    },
+    {
+      "name": "سیب دماوند",
+      "weight": "1/800",
+      "quantity": "3",
+      "unit_price": "18000",
+      "total_price": "54000"
+    },
+    {
+      "name": "نارنگی بج",
+      "weight": "1/290",
+      "quantity": "2",
+      "unit_price": "23000",
+      "total_price": "29670"
+    },
+      "name": "پرتقال ناول",
+      "weight": "2/130",
+      "quantity": "5",
+      "unit_price": "29500",
+      "total_price": "62835"
+    }
+  ],
+  "grand_total": "1669510",
+  "total_weight": "4/570"
+}
