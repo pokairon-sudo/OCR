@@ -1,0 +1,211 @@
+name: E2E with Model
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_path:
+        description: "Path to test image (in repo)"
+        required: false
+        default: "tests/fixtures/my_invoice_fa.jpg"
+        type: string
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  # روی runner خودت (self-hosted) — سریع چون مدل از قبل نصبه
+  # ═══════════════════════════════════════════════════════════════════
+  e2e-self-hosted:
+    name: E2E (self-hosted with Ollama)
+    runs-on: [self-hosted, ollama]
+    timeout-minutes: 20
+    continue-on-error: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Ollama service
+        run: |
+          curl --retry 15 --retry-delay 2 --retry-connrefused \
+               --silent --fail \
+               http://127.0.0.1:11434/api/tags > /dev/null \
+            || (echo "❌ Ollama not reachable"; exit 1)
+          echo "✅ Ollama is running"
+
+      - name: Verify context is 8k
+        run: |
+          ctx=$(ollama show qwen2.5vl:3b-8k 2>/dev/null \
+                | grep -i num_ctx | awk '{print $NF}')
+          if [ "$ctx" != "8192" ]; then
+            echo "❌ num_ctx=$ctx, expected 8192"
+            echo "Run: ollama create qwen2.5vl:3b-8k -f Modelfile"
+            exit 1
+          fi
+          echo "✅ Model has num_ctx=8192"
+
+      - name: Verify fixture image exists
+        run: |
+          IMG="${{ github.event.inputs.image_path || 'tests/fixtures/my_invoice_fa.jpg' }}"
+          if [ ! -f "$IMG" ]; then
+            echo "❌ Test image not found: $IMG"
+            echo "Commit your sample invoice to tests/fixtures/"
+            exit 1
+          fi
+          echo "✅ Test image: $IMG"
+
+      - name: Run extraction
+        id: extract
+        env:
+          OLLAMA_MODEL: qwen2.5vl:3b-8k
+          OLLAMA_TIMEOUT: "180"
+        run: |
+          IMG="${{ github.event.inputs.image_path || 'tests/fixtures/my_invoice_fa.jpg' }}"
+          python main.py "$IMG" --json > result.json 2> extract.log
+          echo "--- Extraction log ---"
+          cat extract.log
+          echo "--- Result ---"
+          cat result.json
+
+      - name: Validate JSON structure
+        run: |
+          python <<'PY'
+          import json, sys
+          with open('result.json') as f:
+              data = json.load(f)
+          errors = []
+          if 'items' not in data:
+              errors.append("missing 'items' key")
+          if 'grand_total' not in data:
+              errors.append("missing 'grand_total' key")
+          if not isinstance(data.get('items'), list):
+              errors.append("'items' is not a list")
+          if len(data.get('items', [])) == 0:
+              errors.append("'items' is empty")
+          for i, item in enumerate(data.get('items', [])):
+              for key in ['name', 'weight', 'quantity', 'unit_price', 'total_price']:
+                  if key not in item:
+                      errors.append(f"item[{i}] missing '{key}'")
+          if errors:
+              print("❌ JSON validation failed:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+          print(f"✅ Valid JSON: {len(data['items'])} items, total={data['grand_total']}")
+          PY
+
+      - name: Compare with expected (if exists)
+        if: hashFiles('tests/fixtures/expected.json') != ''
+        run: |
+          python <<'PY'
+          import json
+          actual = json.load(open('result.json'))
+          expected = json.load(open('tests/fixtures/expected.json'))
+
+          # نرمال‌سازی برای مقایسه
+          from invoice.utils import clean_int
+
+          actual_total = clean_int(actual.get('grand_total'))
+          expected_total = clean_int(expected.get('grand_total'))
+
+          if actual_total != expected_total:
+              print(f"⚠ Grand total mismatch:")
+              print(f"  expected: {expected_total:,}")
+              print(f"  actual:   {actual_total:,}")
+              print(f"  diff:     {actual_total - expected_total:+,}")
+              # در حالت strict، خروج با خطا
+              if "${{ github.event_name }}" == "push" and "${{ startsWith(github.ref, 'refs/tags/') }}":
+                  raise SystemExit(1)
+          else:
+              print(f"✅ Grand total matches: {actual_total:,}")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-result-${{ github.run_id }}
+          path: |
+            result.json
+            extract.log
+            /tmp/invoice_prep.png
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ═══════════════════════════════════════════════════════════════════
+  # fallback: نصب Ollama روی GitHub-hosted (کند ولی کار می‌کنه)
+  # ═══════════════════════════════════════════════════════════════════
+  e2e-github-hosted:
+    name: E2E (GitHub-hosted, slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # فقط اگه self-hosted نبود
+    if: github.event_name == 'workflow_dispatch' && inputs.use_hosted == 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1 libglib2.0-0
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama --version
+
+      - name: Start Ollama daemon
+        run: |
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:11434/api/tags && break
+            sleep 1
+          done
+
+      - name: Pull and derive model
+        run: |
+          ollama pull qwen2.5vl:3b
+          ollama show qwen2.5vl:3b --modelfile > /tmp/q.Modelfile
+          if grep -q '^PARAMETER num_ctx' /tmp/q.Modelfile; then
+            sed -i 's/^PARAMETER num_ctx.*/PARAMETER num_ctx 8192/' /tmp/q.Modelfile
+          else
+            echo 'PARAMETER num_ctx 8192' >> /tmp/q.Modelfile
+          fi
+          ollama create qwen2.5vl:3b-8k -f /tmp/q.Modelfile
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Run extraction
+        env:
+          OLLAMA_MODEL: qwen2.5vl:3b-8k
+        run: |
+          python main.py tests/fixtures/my_invoice_fa.jpg --json > result.json
+          cat result.json
