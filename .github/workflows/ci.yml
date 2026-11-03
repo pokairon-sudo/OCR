@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main, for_invoce, develop]
+  pull_request:
+    branches: [main, for_invoce]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  # تست واحد — روی سرور رایگان GitHub
+  # ═══════════════════════════════════════════════════════════════════
+  unit-tests:
+    name: Unit tests / py${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+        exclude:
+          # macOS runner با 3.11 کند است، حذف می‌کنیم
+          - os: macos-latest
+            python: "3.11"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libgl1 libglib2.0-0 libsm6 libxext6 libxrender1
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install opencv 2>/dev/null || true
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements.txt
+
+      - name: Show environment
+        run: |
+          echo "Python: $(python --version)"
+          echo "pip: $(pip --version)"
+          pip list
+
+      - name: Run unit tests
+        run: pytest -q --tb=short
+
+      - name: Verify package imports
+        run: |
+          python -c "
+          import invoice
+          from invoice import extract, preprocess, Invoice, LineItem
+          from invoice.utils import clean_int, normalize_digits
+          print('✅ All public imports OK')
+          "
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            .pytest_cache/
+            *.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════════
+  # بررسی یکپارچگی فایل‌های پروژه
+  # ═══════════════════════════════════════════════════════════════════
+  project-integrity:
+    name: Project file integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files exist
+        run: |
+          missing=0
+          for f in main.py api.py requirements.txt pyproject.toml \
+                   invoice/__init__.py invoice/extract.py \
+                   invoice/preprocess.py invoice/schema.py invoice/utils.py \
+                   README.md INSTALL.md; do
+            if [ ! -f "$f" ]; then
+              echo "❌ Missing: $f"
+              missing=$((missing + 1))
+            else
+              echo "✅ Found: $f"
+            fi
+          done
+          [ $missing -eq 0 ] || exit 1
+
+      - name: Check .env is NOT committed
+        run: |
+          if [ -f .env ]; then
+            echo "❌ .env is committed! This is a security issue."
+            exit 1
+          fi
+          echo "✅ .env is not tracked"
+
+      - name: Check .venv is NOT committed
+        run: |
+          if [ -d .venv ]; then
+            echo "❌ .venv/ is committed! Should be in .gitignore"
+            exit 1
+          fi
+          echo "✅ .venv/ is not tracked"
+
+      - name: Check .gitignore has critical entries
+        run: |
+          for pattern in ".env" ".venv/" "__pycache__/" "*.pyc"; do
+            if ! grep -qF "$pattern" .gitignore 2>/dev/null; then
+              echo "⚠ .gitignore missing pattern: $pattern"
+            fi
+          done
