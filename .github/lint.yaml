@@ -1,0 +1,51 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, for_invoce]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install linters
+        run: |
+          pip install --upgrade pip
+          pip install ruff pyright
+
+      - name: Ruff (fast Python linter)
+        run: ruff check . --output-format=github
+        continue-on-error: true
+
+      - name: Ruff format check
+        run: ruff format --check . || true
+
+      - name: Pyright (type checking)
+        run: pyright invoice/ main.py api.py || true
+
+      - name: Check file endings (no CRLF)
+        run: |
+          if grep -rlI $'\r' --include="*.py" .; then
+            echo "❌ Files with CRLF line endings found"
+            exit 1
+          fi
+          echo "✅ All files use LF"
+
+      - name: Check for trailing whitespace
+        run: |
+          if grep -rnI ' $' --include="*.py" .; then
+            echo "⚠ Trailing whitespace found (non-blocking)"
+          fi
